@@ -6,10 +6,7 @@
 #include <sys/socket.h> // send(),recv()
 #include <netdb.h>      // gethostbyname()
 
-
 #define VALID_CHARS "ABCDEFGHIJKLMNOPQRSTUVWXYZ "
-#define MAX_BUFFER_SIZE 1000
-
 
 /**
 * Client code
@@ -40,7 +37,7 @@ void setupAddressStruct(struct sockaddr_in* address,
   // Get the DNS entry for this host name
   struct hostent* hostInfo = gethostbyname(hostname); 
   if (hostInfo == NULL) { 
-    fprintf(stderr, "enc_client: ERROR, no such host\n"); 
+    fprintf(stderr, "CLIENT: ERROR, no such host\n"); 
     exit(0); 
   }
   // Copy the first IP address from the DNS entry to sin_addr.s_addr
@@ -49,76 +46,85 @@ void setupAddressStruct(struct sockaddr_in* address,
         hostInfo->h_length);
 }
 
-
-// Send all the data
-void sendAll(int socketFD, char *buffer, int length){
-  int charsWritten;
-  int totalSent = 0;
-
-  while (totalSent < length){
-      charsWritten = send(socketFD, buffer + totalSent, length - totalSent, 0);
-      if (charsWritten < 0) error("enc_client error: writing to socket");
-      totalSent += charsWritten;
-  }
-}
-
-
-// Receive all the data
-void recvAll(int socketFD, char *buffer, int length){
-  int charsRead;
-  int totalReceived = 0;
-
-  while (totalReceived < length){
-      charsRead = recv(socketFD, buffer + totalReceived, length - totalReceived, 0);
-      if (charsRead < 0) error("enc_client error: reading from socket");
-      totalReceived += charsRead;
-  }
-}
-
-
 // Checks for bad characters
-void validate(const char *buffer, const char *filename){
+void validate(const char *buffer){
   if (strspn(buffer, VALID_CHARS) != strlen(buffer)) {
       fprintf(stderr, "enc_client error: input contains bad characters\n");
       exit(1);
   }
 }
 
-
 // Read the plaintext file
-char *readFile(const char *filename, int *length){
-  FILE *file = fopen(filename, "r");
-
-  if (file == NULL) {
-      fprintf(stderr, "enc_client error: opening file %s\n", filename);
+char *readFile(const char *filename) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp) {
+      fprintf(stderr, "enc_client error: cannot open file %s\n", filename);
       exit(1);
   }
-
-  // Determines file size
-  fseek(file, 0, SEEK_END);
-  *length = ftell(file);
-  rewind(file);
-
-  char *buffer = malloc((*length) + 1);
-  if (!buffer) {
-      fprintf(stderr, "enc_client error: allocating memory for file %s\n", filename);
+  // Move to end to determine file size.
+  if (fseek(fp, 0, SEEK_END) != 0) {
+      fprintf(stderr, "enc_client error: fseek error in %s\n", filename);
       exit(1);
   }
+  int length = ftell(fp);
+  rewind(fp);
+  char *buffer = malloc(length + 1);
+  fread(buffer, sizeof(char), length, fp);
+  fclose(fp);
 
-  fread(buffer, 1, *length, file);
-  fclose(file);
-
-  // Removes newline in the file
-  buffer[*length - 1] = '\0';
-  (*length)--;
+  buffer[length] = '\0';
+  buffer[strcspn(buffer, "\n")] = '\0'; 
 
   return buffer;
 }
 
+int sendAll(int s, char *buf, int *len)
+{
+    int total = 0;        
+    int bytesleft = *len; 
+    int n;
+
+    while(total < *len) {
+        n = send(s, buf+total, bytesleft, 0);
+        if (n == -1) { break; }
+        total += n;
+        bytesleft -= n;
+    }
+
+    *len = total; 
+
+    return n == -1 ? -1 : 0; 
+}
+
+int recvAll(int s, char *buf, int *len)
+{
+    int total = 0;        
+    int bytesleft = *len; 
+    int n;
+
+    while(total < *len) {
+        n = recv(s, buf + total, bytesleft, 0);
+        if (n == -1) { break; }
+        if (n == 0) { break; } 
+        total += n;
+        bytesleft -= n;
+    }
+
+    *len = total; 
+
+    return n == -1 ? -1 : 0; 
+}
+
+void sendInt(int socketFD, int value){
+  int converted = htonl(value);
+  if(send(socketFD, &converted, sizeof(converted), 0) == -1){
+    perror("sendInt");
+    exit(2);
+  }
+}
 
 int main(int argc, char *argv[]) {
-  int socketFD, plaintextLength, keyLength, sendSize;
-  int sent = 0;
+  int socketFD, charsWritten, charsRead;
   struct sockaddr_in serverAddress;
   char buffer[256];
   // Check usage & args
@@ -128,15 +134,13 @@ int main(int argc, char *argv[]) {
   }
 
   // Read files
-  char *plaintext = readFile(argv[1], &plaintextLength);
-  char *key = readFile(argv[2], &keyLength);
+  char *plaintext = readFile(argv[1]);
+  char *key = readFile(argv[2]);
 
-  // Checks for bad characters
-  validate(plaintext, argv[1]);
-  validate(key, argv[2]);
+  // Validate plaintext and key
+  validate(plaintext);
 
-  // Check if key is shoter than plaintext
-  if (keyLength < plaintextLength){
+  if (strlen(key) < strlen(plaintext)) {
     fprintf(stderr, "Error: key '%s' is too short\n", argv[2]);
     exit(1);
   }
@@ -156,38 +160,45 @@ int main(int argc, char *argv[]) {
     exit(2);
   }
 
-  // Sends the all the data to enc_server
-  sendAll(socketFD, (char *)&plaintextLength, sizeof(int));
+  int textLen = strlen(plaintext);
+  sendInt(socketFD, textLen); 
+  if(sendAll(socketFD, plaintext, &textLen) == -1){
+    perror("sendAll");
+    printf("We only sent %d bytes because of the error!\n", textLen);
+    exit(2);
+  } 
 
-  while (sent < plaintextLength) {
-    if (plaintextLength - sent < MAX_BUFFER_SIZE) {
-        sendSize = plaintextLength - sent;
-    } else {
-        sendSize = MAX_BUFFER_SIZE;
-    }
-    sendAll(socketFD, plaintext + sent, sendSize);
-    sendAll(socketFD, key + sent, sendSize); 
-    sent += sendSize;  
+  int keyLen = strlen(key);
+  sendInt(socketFD, keyLen); 
+  if(sendAll(socketFD, key, &keyLen) == -1){
+    perror("sendAll");
+    printf("We only sent %d bytes because of the error!\n", keyLen);
+    exit(2);
   }
 
-  // Free up allocated buffers
+  char *ciphertext = malloc(textLen + 1);
+  if (!ciphertext){
+    fprintf(stderr, "enc_client error: allocating memory for ciphertext\n");
+    exit(1);
+  }
+
+  // Clear out the buffer again for reuse
+  memset(ciphertext, '\0', textLen + 1);
+
+  int recvLen = textLen;
+  if(recvAll(socketFD, ciphertext, &recvLen) == -1){
+      perror("recvAll");
+      free(ciphertext);
+      exit(1);
+  }
+
+  // Prints ciphertext stdout
+  fprintf(stdout, "%s\n", ciphertext);
+  fflush(stdout);
+
+  free(ciphertext);
   free(plaintext);
   free(key);
-
-  char *ciphertext = malloc(plaintextLength + 1);
-    if (!ciphertext) {
-        fprintf(stderr, "enc_client error: allocating memory for ciphertext\n");
-        exit(1);
-    }
-  
-  // Clear out the buffer again for reuse
-  memset(ciphertext, '\0', plaintextLength + 1);
-
-  // Receives all the data
-  recvAll(socketFD, ciphertext, plaintextLength);
-
-  // Free up allocated buffers
-  free(ciphertext);
 
   // Close the socket
   close(socketFD); 

@@ -27,8 +27,79 @@ void setupAddressStruct(struct sockaddr_in* address,
   address->sin_addr.s_addr = INADDR_ANY;
 }
 
+int charToNum(char c) {
+  if(c == ' '){
+    return 26;
+  }
+  return c - 'A';
+}
+
+char numToChar(int num){
+  if (num == 26){
+    return ' ';
+  }
+  return 'A' + num;
+}
+
+int recvAll(int s, char *buf, int *len){
+  int total = 0;        
+  int bytesleft = *len; 
+  int n;
+
+  while(total < *len) {
+      n = recv(s, buf + total, bytesleft, 0);
+      if (n == -1) { break; }
+      if (n == 0) { break; } 
+      total += n;
+      bytesleft -= n;
+  }
+
+  *len = total; 
+
+  return n == -1 ? -1 : 0; 
+}
+
+int sendAll(int s, char *buf, int *len)
+{
+    int total = 0;        
+    int bytesleft = *len; 
+    int n;
+
+    while(total < *len) {
+        n = send(s, buf+total, bytesleft, 0);
+        if (n == -1) { break; }
+        total += n;
+        bytesleft -= n;
+    }
+
+    *len = total; 
+
+    return n == -1 ? -1 : 0; 
+}
+
+int recvInt(int socket) {
+  int value;
+  int n = recv(socket, &value, sizeof(value), 0);
+  if (n <= 0){
+    error("ERROR receiving integer");
+  } 
+  return ntohl(value);
+}
+
+void encrypt(const char *plaintext, const char *key, char *ciphertext) {
+  int textLen = strlen(plaintext);
+
+  for (int i = 0; i < textLen; i++) {
+      int plainNum = charToNum(plaintext[i]);
+      int keyNum = charToNum(key[i]);
+      int cipherNum = (plainNum + keyNum) % 27;
+      ciphertext[i] = numToChar(cipherNum);
+  }
+  ciphertext[textLen] = '\0';
+}
+
 int main(int argc, char *argv[]){
-  int connectionSocket, charsRead;
+  int connectionSocket, charsRead, textLen, keyLen;
   char buffer[256];
   struct sockaddr_in serverAddress, clientAddress;
   socklen_t sizeOfClientInfo = sizeof(clientAddress);
@@ -68,25 +139,31 @@ int main(int argc, char *argv[]){
       error("ERROR on accept");
     }
 
-    printf("SERVER: Connected to client running at host %d port %d\n", 
-                          ntohs(clientAddress.sin_addr.s_addr),
-                          ntohs(clientAddress.sin_port));
+    // Receives Plaintext
+    textLen = recvInt(connectionSocket);
+    char *plaintext = malloc(textLen + 1);
+    memset(plaintext, '\0', textLen + 1);
 
-    // Get the message from the client and display it
-    memset(buffer, '\0', 256);
-    // Read the client's message from the socket
-    charsRead = recv(connectionSocket, buffer, 255, 0); 
-    if (charsRead < 0){
-      error("ERROR reading from socket");
-    }
-    printf("SERVER: I received this from the client: \"%s\"\n", buffer);
+    recvAll(connectionSocket, plaintext, &textLen);
 
-    // Send a Success message back to the client
-    charsRead = send(connectionSocket, 
-                    "I am the server, and I got your message", 39, 0); 
-    if (charsRead < 0){
-      error("ERROR writing to socket");
-    }
+    // Receives Key
+    keyLen = recvInt(connectionSocket);
+    char *key = malloc(keyLen + 1);
+    memset(key, '\0', keyLen + 1);
+    recvAll(connectionSocket, key, &keyLen);
+
+    // Create Ciphertext
+    char *ciphertext = malloc(textLen + 1);
+    encrypt(plaintext, key, ciphertext);
+
+    // Send Ciphertext to client
+    sendAll(connectionSocket, ciphertext, &textLen);
+
+    // Free up memory
+    free(plaintext);
+    free(key);
+    free(ciphertext);
+
     // Close the connection socket for this client
     close(connectionSocket); 
   }
